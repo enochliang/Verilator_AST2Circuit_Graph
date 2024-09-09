@@ -1,4 +1,6 @@
 from lxml import etree
+import pprint 
+pp = pprint.PrettyPrinter(indent=4)
 
 class AST_Parser:
     def __init__(self, ast: etree._ElementTree):
@@ -16,8 +18,9 @@ class AST_Parser:
             else:
                 signals.add(var.attrib["name"])
         if output:
+            print("Print All Signals Including WIRE & Flip-Flop...")
             for sig in signals:
-                print(sig)
+                print("  "+sig)
 
 
     def check_dtype(self,output=True) -> set:
@@ -28,39 +31,11 @@ class AST_Parser:
                 if not dtype.attrib["right"] == "0":
                     dtypes.add((("id",dtype.attrib["id"]),("left",dtype.attrib["left"]),("right",dtype.attrib["right"])))
         if output:
+            print("Print Packed dtype That Doesn't Start With Zero Bit.")
             for dtype in dtypes:
                 print(dtype)
         return dtypes
 
-    def get_all_tags_under(self,target="verilator_xml",output=True) -> set:
-        # Make a List of All Kinds of Tags.
-        tags = set()
-        target_nodes = self.ast.findall(".//"+target)
-        if target_nodes:
-            for t_node in target_nodes:
-                for node in t_node.iter():
-                    tags.add(node.tag)
-            if output:
-                print("get all tags under <"+target+">:")
-                for tag in tags:
-                    print("  <"+tag+">")
-        return tags
-
-    def get_ordered_children_under(self,target="verilator_xml",output=True) -> list:
-        # Make a List of All Kinds of Tags.
-        childrens = []
-        target_nodes = self.ast.findall(".//"+target)
-        if target_nodes:
-            for t_node in target_nodes:
-                children = []
-                for node in t_node.getchildren():
-                    children.append(node.tag)
-                childrens.append(children)
-            if output:
-                print("get ordered children under <"+target+">:")
-                for c in childrens:
-                    print(c)
-        return childrens
 
     def get_dtypetable_as_dict(self,output=True) -> dict:
         dtypes_dict = dict()
@@ -74,8 +49,9 @@ class AST_Parser:
             basic_node = self._search_basic_dtype(node)
             dtypes_dict[node.attrib["id"]] = basic_node.attrib["name"]
         if output:
+            print("Dtypetable Dictionary:")
             for dtype in dtypes_dict.items():
-                print(dtype)
+                print("  "+str(dtype))
         return dtypes_dict
 
     def _search_basic_dtype(self,node):
@@ -124,6 +100,59 @@ class AST_Parser:
                 print(var)
         return var_set
 
+    def get_all_tags_under(self,target="verilator_xml",output=True) -> set:
+        # Make a List of All Kinds of Tags.
+        tags = set()
+        target_nodes = self.ast.findall(".//"+target)
+        if target_nodes:
+            for t_node in target_nodes:
+                for node in t_node.iter():
+                    tags.add(node.tag)
+            if output:
+                print("get all tags under <"+target+">:")
+                for tag in tags:
+                    print("  <"+tag+">")
+        return tags
+
+    def get_ordered_children_under(self,target="verilator_xml",output=True) -> list:
+        # Make a List of All Kinds of Tags.
+        childrens = []
+        target_nodes = self.ast.findall(".//"+target)
+        if target_nodes:
+            for t_node in target_nodes:
+                children = []
+                for node in t_node.getchildren():
+                    children.append(node.tag)
+                if not children in childrens:
+                    childrens.append(children)
+            if output:
+                print("get ordered children under <"+target+">:")
+                for c in childrens:
+                    print("  "+str(c))
+        return childrens
+
+    def check_tag_all_x_are_under_y(self,x:str,y:str):
+        target_nodes = self.ast.findall(".//"+x)
+        flag = False
+        for x_node in target_nodes:
+            if not y in self.ast.getpath(x_node):
+                print("Found a <"+x+"> not under <"+y+">")
+                flag = True
+        if not flag:
+            print("ALL <"+x+"> are under <"+y+">")
+
+    def check_all_left_values_are_single_var(self):
+        assignments = self.ast.findall(".//assign") + self.ast.findall(".//assigndly") + self.ast.findall(".//contassign")
+        flag = False
+        for assign in assignments:
+            tag = assign.getchildren()[1].tag
+            if not tag == "varref":
+                print("Found a Left Value Not a Single <varref>!")
+                print("  Tag = "+tag)
+                print(assign.getchildren()[1].getchildren()[0].attrib["name"])
+                flag = True
+        if not flag:
+            print("All Left Values are Single <varref>")
 
 
 def Verilator_AST_Tree(ast_file_path:str) -> etree._ElementTree:
@@ -131,15 +160,11 @@ def Verilator_AST_Tree(ast_file_path:str) -> etree._ElementTree:
 
 
 if __name__ == "__main__":
-    ast = Verilator_AST_Tree("./Vr8051.xml")
-    print(ast.find(".//arraysel"))
-    parser = AST_Parser(ast)
-    parser.get_all_tags_under("scope")
-    #parser.get_ordered_children_under("always//if")
+    ast = Verilator_AST_Tree("./ast/Vsha1_core.xml")
 
-    tags_under_always = set()
-    #for node in ast.findall(".//module"):
-    #    for child in node.getchildren():
-    #        tags_under_always.add(child.tag)
-    #print(tags_under_always)
-    #checker.get_signal()
+    #pp.pprint(AST_Parser.__dict__)
+    parser = AST_Parser(ast)
+    #parser.get_all_tags_under("always//if")
+    parser.check_all_left_values_are_single_var()
+    #parser.check_tag_all_x_are_under_y("assign","always")
+
