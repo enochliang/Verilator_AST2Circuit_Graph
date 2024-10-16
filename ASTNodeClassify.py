@@ -19,3 +19,7 @@ class ASTNodeClassify:
         self.name_as_name_node = self.var_node | self.const_node
         self.same_input_link_node = self.logic_op | self.red_logic_op | self.eq_op | self.commutable_arith_op | self.extend_op
         self.diff_2_input_link_node = self.less_n_greater_op | self.merge_op | self.not_commutable_arith_op
+
+        self.sim_commutable_2in_op = self.commutable_arith_op | {"and", "or", "xor"} | self.eq_op | {"logor","logand"}
+        self.sim_1in_op = {"extend"} | {"sel"} | {"not"} | self.red_logic_op
+        self.sim_not_commutable_2in_op = self.not_commutable_arith_op | self.merge_op | self.less_n_greater_op

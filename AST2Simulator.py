@@ -1,9 +1,18 @@
 from lxml import etree
+import json
 import igraph as ig
 from Verilator_AST import *
 from ASTNodeClassify import *
 from copy import deepcopy
 import pprint
+
+class SimulationError(Exception):
+    def __init__(self, message, error_code):
+        super().__init__(message)
+        self.error_code = error_code
+
+    def __str__(self):
+        return f"{self.args[0]} (Error Code: {self.error_code})"
 
 class Node:
     def __init__(self,name:str,width:int,value:str,node_type:str,fault_list:dict):
@@ -12,6 +21,16 @@ class Node:
         self.value = value # "xxxxx"
         self.node_type = node_type # "Wire", "FF_in", "FF_out", "OP"
         self.fault_list = fault_list # {"Signal_A":0.9 , ...}
+        self.ready_flag = False
+        self.attrib = dict()
+
+    def set_fault_list(self,fault_list:dict):
+        self.fault_list = fault_list
+    def set_value(self,value:str):
+        self.value = value
+    def set_attrib(self,attrib:dict):
+        for key in attrib.keys():
+            self.attrib[key] = attrib[key]
 
 
 def verilog_num2num(num:str):
@@ -99,6 +118,7 @@ class AST2Simulator(ASTNodeClassify):
 
         # Scheduling
         self.numbering_circuit_graph_node()
+        self.dump_graph_sig_list()
         self.load_node()
         self.load_edge()
         self.schedule_tree()
@@ -393,6 +413,20 @@ class AST2Simulator(ASTNodeClassify):
         print("Done.")
         print(f"    => Total Node Number = {node_num}")
 
+    def dump_graph_sig_list(self):
+        sig_dict = {}
+        total_sig_num = len(self._ast.findall(".//topscope//varscope"))
+        for sig_num in range(total_sig_num):
+            var = self._ast.find(f".//topscope//varscope[@node_id='{sig_num}']")
+            if not ("type" in var.attrib and var.attrib["type"] == "FF_in"):
+                width = int(var.attrib["width"])
+                sig_dict[var.attrib["name"]] = width
+
+        f = open("graph_sig_dict.json","w")
+        f.write(json.dumps(sig_dict, indent=4))
+        f.close()
+        
+
     def load_node(self):
         self.circuit_graph_node = []
         for idx in range(self.var_num):
@@ -426,6 +460,8 @@ class AST2Simulator(ASTNodeClassify):
                        node_type = node_type,
                        fault_list = dict()
                      )
+            if name == "sel":
+                n_node.set_attrib({"bits":node.attrib["name"]})
             self.circuit_graph_node.append(n_node)
         print(f"    Loaded {len(self.circuit_graph_node)} Nodes.")
     
@@ -470,7 +506,7 @@ class AST2Simulator(ASTNodeClassify):
                                 #print(child.attrib)
                                 if "node_id" in child.attrib:
                                     child_node_id = int(child.attrib["node_id"])
-                                    self.circuit_graph_edge.append((cur_node_id,"1",child_node_id))
+                                    self.circuit_graph_edge.append((cur_node_id,"0",child_node_id))
                                     edge_cnt += 1
                                 else:
                                     print(f"Warning: Found a node under <if/begin[2]/assign> doesn't have node node_id.")
@@ -504,8 +540,34 @@ class AST2Simulator(ASTNodeClassify):
                                 if not "node_id" in child.attrib:
                                     child = child.getchildren()[0]
                                 child_node_id = int(child.attrib["node_id"])
-                                self.circuit_graph_edge.append((cur_node_id,const.attrib["name"],child_node_id))
+                                self.circuit_graph_edge.append((cur_node_id,"default",child_node_id))
                                 edge_cnt += 1
+                    elif node.tag == "cond":
+                        children = node.getchildren()
+                        child = children[0]
+                        if "node_id" in child.attrib:
+                            child_node_id = int(child.attrib["node_id"])
+                            self.circuit_graph_edge.append((cur_node_id,"ctrl",child_node_id))
+                            edge_cnt += 1
+                        else:
+                            print(f"Error: Found a node at <cond/*[0]> doesn't have node node_id.")
+                        # Connect <cond> & <cond/*[1]>
+                        child = children[1]
+                        if "node_id" in child.attrib:
+                            child_node_id = int(child.attrib["node_id"])
+                            self.circuit_graph_edge.append((cur_node_id,"1",child_node_id))
+                            edge_cnt += 1
+                        else:
+                            print(f"Error: Found a node at <cond/*[1]/assign> doesn't have node node_id.")
+                        # Connect <cond> & <cond/*[2]>
+                        #if len(children) == 3:
+                        child = children[2]
+                        if "node_id" in child.attrib:
+                            child_node_id = int(child.attrib["node_id"])
+                            self.circuit_graph_edge.append((cur_node_id,"0",child_node_id))
+                            edge_cnt += 1
+                        else:
+                            print(f"Warning: Found a node under <cond/*[2]> doesn't have node node_id which is not a <assign>.")
                     else:
                         if node.tag in self.diff_2_input_link_node:
                             # Connect Left Parent
@@ -557,7 +619,6 @@ class AST2Simulator(ASTNodeClassify):
                                 else:
                                     print(f"Warning: Found a node under a operator doesn't have node_id which is not an <assign>.")
         self.circuit_graph_edge = sorted(self.circuit_graph_edge,key = lambda link: link[0])
-        #pprint.pp(self.circuit_graph_edge)
         print("Done.")
         print(f"    => Total Edge Number = {edge_cnt}")
 
@@ -603,7 +664,6 @@ class AST2Simulator(ASTNodeClassify):
                 self.decision_tree_list.remove(tree_attr)
 
         self.scheduled_decision_tree_list += tmp_decision_tree_list_ff
-        #pprint.pp(self.scheduled_decision_tree_list)
             
     def schedule_node(self):
         self.scheduled_node_num_list = []
@@ -614,7 +674,6 @@ class AST2Simulator(ASTNodeClassify):
                     self.scheduled_node_num_list.append(int(var.attrib["node_id"]))
                 if var.attrib["type"] == "FF_in":
                     tail.append(int(var.attrib["node_id"]))
-        #pprint.pp(self.scheduled_node_num_list)
         for tree_info in self.scheduled_decision_tree_list:
             tree_id = tree_info["tree_id"]
             c_tree = self.schedule_ast.find(f".//*[@tree_id='{tree_id}']")
@@ -643,20 +702,320 @@ class AST2Simulator(ASTNodeClassify):
         return (self.circuit_graph_node, self.circuit_graph_edge)
     def get_node_order(self):
         return self.scheduled_node_num_list
+    def get_signal_table(self):
+        signal_table = dict()
+        for var in self._ast.findall(".//topscope//varscope"):
+            signal_table[var.attrib["name"]] = {"width":var.attrib["width"],"node_id":var.attrib["node_id"]}
+        #pprint.pp(list(signal_table.keys()))
+        return signal_table
 
     def output(self):
         with open("output.xml","wb") as fp:
             fp.write(etree.tostring(self._ast.find(".")))
 
 
-class Simulator:
-    pass
+class Simulator(ASTNodeClassify):
+    def __init__(self):
+        ASTNodeClassify.__init__(self)
+        ast = Verilator_AST_Tree("./ast/Vsha1.xml")
+        sim = AST2Simulator(ast)
+        sim.build_simulator()
+        self.circuit_graph_node, self.circuit_graph_edge = sim.get_circuit_graph()
+        self.circuit_graph_edge_grouped = [None]*len(self.circuit_graph_node)
+        cur_id = None
+        cur_edges = []
+        for edge in self.circuit_graph_edge:
+            if cur_id == edge[0]:
+                cur_edges.append(edge)
+            else:
+                if cur_id != None:
+                    self.circuit_graph_edge_grouped[cur_id] = cur_edges
+                cur_id = edge[0]
+                cur_edges = [edge]
+        self.circuit_graph_edge_grouped[cur_id] = cur_edges
+
+        self.scheduled_node_num_list = sim.get_node_order()
+        self.signal_table = sim.get_signal_table()
+        self.cycle = 207
+
+    def load_logic_value(self):
+        f = open("graph_sig_dict.json","r")
+        self.sig_dict = json.load(f)
+        f.close()
+        self.sig_dict.pop("clk")
+        self.unknown_sig_list = [sig for sig in self.sig_dict.keys() if "__Vdfg" in sig]
+        for sig in self.unknown_sig_list:
+            self.sig_dict.pop(sig)
+
+        
+        f = open(f"../sha1/run_graph/pattern/FaultFree_Signal_Value_C{self.cycle:05}.txt","r")
+        logic_values = f.readlines()
+        for i,v in enumerate(logic_values):
+            logic_values[i] = logic_values[i].replace("\n","")
+        f.close()
+        # Loading Logic Values
+        for idx, sig in enumerate(self.sig_dict.keys()):
+            width = int(self.signal_table[sig]["width"])
+            node_id = int(self.signal_table[sig]["node_id"])
+            if self.circuit_graph_node[node_id].width != width:
+                # Check the Loaded Value Has Correct Width
+                print("Error: width incorrect!!!")
+            else:
+                if self.circuit_graph_node[node_id].node_type == "FF_out":
+                    sig_name = self.circuit_graph_node[node_id].name
+                    self.circuit_graph_node[node_id].set_fault_list({sig_name:1.0})
+                self.circuit_graph_node[node_id].value = logic_values[idx]
+                self.circuit_graph_node[node_id].ready_flag = True
+
+    def _compute(self,node_id):
+        name = self.circuit_graph_node[node_id].name
+        edges = self.circuit_graph_edge_grouped[node_id]
+        width = self.circuit_graph_node[node_id].width
+        if name in self.sim_commutable_2in_op:
+            a_id = edges[0][2]
+            b_id = edges[1][2]
+            a = self.circuit_graph_node[a_id].value
+            b = self.circuit_graph_node[b_id].value
+            if name == 'xor':
+                if not (self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag):
+                    raise SimulationError(f"Error: Scheduling Incorrect. NODE_ID = {node_id}, OP_NAME = {name}",2)
+                if len(a) != len(b):
+                    raise SimulationError(f"Error: Input Widths Don't Match. NODE_ID = {node_id}, OP_NAME = {name}",1)
+                # TO MOVE OUT
+                if "x" in a or "x" in b:
+                    result = "x"*width
+                elif self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag:
+                    result = int(a, 2) ^ int(b, 2)
+                    result = f"{result:0{len(a)}b}"
+            elif name == 'and':
+                if not (self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag):
+                    raise SimulationError(f"Error: Scheduling Incorrect. NODE_ID = {node_id}, OP_NAME = {name}",2)
+                if len(a) != len(b):
+                    raise SimulationError(f"Error: Input Widths Don't Match. NODE_ID = {node_id}, OP_NAME = {name}",1)
+                # TO MOVE OUT
+
+                if "x" in a or "x" in b:
+                    result = "x"*width
+                elif self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag:
+                    result = int(a, 2) & int(b, 2)
+                    result = f"{result:0{len(a)}b}"
+            elif name == 'or':
+                if not (self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag):
+                    raise SimulationError(f"Error: Scheduling Incorrect. NODE_ID = {node_id}, OP_NAME = {name}",2)
+                if len(a) != len(b):
+                    raise SimulationError(f"Error: Input Widths Don't Match. NODE_ID = {node_id}, OP_NAME = {name}",1)
+                # TO MOVE OUT
+                if "x" in a or "x" in b:
+                    result = "x"*width
+                elif self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag:
+                    result = int(a, 2) | int(b, 2)
+                    result = f"{result:0{len(a)}b}"
+            elif name == 'add':
+                if not (self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag):
+                    raise SimulationError(f"Error: Scheduling Incorrect. NODE_ID = {node_id}, OP_NAME = {name}",2)
+                if len(a) != len(b):
+                    raise SimulationError(f"Error: Input Widths Don't Match. NODE_ID = {node_id}, OP_NAME = {name}",1)
+                # TO MOVE OUT
+                if "x" in a or "x" in b:
+                    result = "x"*width
+                elif self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag:
+                    result = int(a, 2) + int(b, 2)
+                    result = f"{result:0{width}b}"
+                    if self.circuit_graph_node[node_id].width != len(result):
+                        result = result[len(result)-width:]
+            elif name == 'eq':
+                if not (self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag):
+                    raise SimulationError(f"Error: Scheduling Incorrect. NODE_ID = {node_id}, OP_NAME = {name}",2)
+                if len(a) != len(b):
+                    raise SimulationError(f"Error: Input Widths Don't Match. NODE_ID = {node_id}, OP_NAME = {name}",1)
+                # TO MOVE OUT
+                if self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag:
+                    result = "1" if a == b else "0"
+            elif name == 'logor':
+                if not (self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag):
+                    raise SimulationError(f"Error: Scheduling Incorrect. NODE_ID = {node_id}, OP_NAME = {name}",2)
+                # Compute OP Result
+                if "x" in a or "x" in b:
+                    result = "x"*width
+                elif self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag:
+                    a = "1" if "1" in a else "0"
+                    b = "1" if "1" in b else "0"
+                    result = int(a,2) | int(b,2)
+                    result = f"{result:0{width}b}"
+            elif name == 'logand':
+                if not (self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag):
+                    raise SimulationError(f"Error: Scheduling Incorrect. NODE_ID = {node_id}, OP_NAME = {name}",2)
+                # Compute OP Result
+                if "x" in a or "x" in b:
+                    result = "x"*width
+                elif self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag:
+                    a = "1" if "1" in a else "0"
+                    b = "1" if "1" in b else "0"
+                    result = int(a,2) & int(b,2)
+                    result = f"{result:0{width}b}"
+            self._check_result_width(width,len(result))
+            self.circuit_graph_node[node_id].set_value(result)
+            self.circuit_graph_node[node_id].ready_flag = True
+        elif name in self.sim_not_commutable_2in_op:
+            a_id = [edge[2] for edge in edges if edge[1] == "left"][0]
+            b_id = [edge[2] for edge in edges if edge[1] == "right"][0]
+            a = self.circuit_graph_node[a_id].value
+            b = self.circuit_graph_node[b_id].value
+            if name == 'gt':
+                if "x" in a or "x" in b:
+                    result = "x"*width
+                else:
+                    result = "1" if int(a,2) > int(b,2) else "0"
+            elif name == 'gte':
+                if "x" in a or "x" in b:
+                    result = "x"*width
+                else:
+                    result = "1" if int(a,2) >= int(b,2) else "0"
+            elif name == 'lt':
+                if "x" in a or "x" in b:
+                    result = "x"*width
+                else:
+                    result = "1" if int(a,2) < int(b,2) else "0"
+            elif name == 'lte':
+                if "x" in a or "x" in b:
+                    result = "x"*width
+                else:
+                    result = "1" if int(a,2) <= int(b,2) else "0"
+            elif name == 'concat':
+                if "x" in a or "x" in b:
+                    result = "x"*width
+                else:
+                    result = a + b
+            self._check_result_width(width,len(result))
+            self.circuit_graph_node[node_id].set_value(result)
+            self.circuit_graph_node[node_id].ready_flag = True
+        elif name in self.sim_1in_op:
+            a_id = edges[0][2]
+            a = self.circuit_graph_node[a_id].value
+            if name == 'extend':
+                result = "0"*(width - len(a)) + a
+                self._check_result_width(width,len(result))
+            elif name == 'not':
+                mask = "1"*len(a)
+                result = int(a,2) ^ int(mask,2)
+                result = f"{result:0{width}b}"
+                self._check_result_width(width,len(result))
+            elif name == 'sel':
+                bits = self.circuit_graph_node[node_id].attrib["bits"]
+                bits = bits[1:-1].split(":")
+                l_bit = int(bits[0])
+                r_bit = int(bits[1])
+                if l_bit == r_bit:
+                    result = a[-1 - l_bit]
+                elif r_bit == 0:
+                    result = a[len(a)-1-l_bit:]
+                else:
+                    result = a[len(a)-1-l_bit:0-r_bit]
+                self._check_result_width(width,len(result))
+            self.circuit_graph_node[node_id].set_value(result)
+            self.circuit_graph_node[node_id].ready_flag = True
+        elif name == 'const':
+            self.circuit_graph_node[node_id].ready_flag = True
+        elif name == 'if':
+            ctrl_id = [edge[2] for edge in edges if edge[1] == "ctrl"][0]
+            ctrl = self.circuit_graph_node[ctrl_id].value
+            if "x" in ctrl:
+                ctrl = "x"
+            else:
+                ctrl = "1" if "1" in ctrl else "0"
+
+            if "x" in ctrl:
+                result = "x"*width
+            else:
+                tmp_edges = [edge[2] for edge in edges if edge[1] == ctrl]
+                if tmp_edges == []:
+                    return
+                src_id = [edge[2] for edge in edges if edge[1] == ctrl][0]
+                result = self.circuit_graph_node[src_id].value
+            self._check_result_width(width,len(result))
+            self.circuit_graph_node[node_id].set_value(result)
+            self.circuit_graph_node[node_id].ready_flag = True
+        elif name == 'case':
+            ctrl_id = [edge[2] for edge in edges if edge[1] == "ctrl"][0]
+            ctrl = self.circuit_graph_node[ctrl_id].value
+            if "x" in ctrl:
+                result = "x"*width
+            else:
+                tmp_edges = [edge[2] for edge in edges if edge[1] == ctrl]
+                if tmp_edges == []:
+                    tmp_edges = [edge[2] for edge in edges if edge[1] == "default"]
+                    if tmp_edges == []:
+                        return
+                src_id = tmp_edges[0]
+                result = self.circuit_graph_node[src_id].value
+            self._check_result_width(width,len(result))
+            self.circuit_graph_node[node_id].set_value(result)
+            self.circuit_graph_node[node_id].ready_flag = True
+        elif name == 'cond':
+            ctrl_id = [edge[2] for edge in edges if edge[1] == "ctrl"][0]
+            ctrl = self.circuit_graph_node[ctrl_id].value
+            if "x" in ctrl:
+                ctrl = "x"
+            else:
+                ctrl = "1" if "1" in ctrl else "0"
+
+            if "x" in ctrl:
+                result = "x"*width
+            else:
+                src_id = [edge[2] for edge in edges if edge[1] == ctrl][0]
+                result = self.circuit_graph_node[src_id].value
+            self._check_result_width(width,len(result))
+            self.circuit_graph_node[node_id].set_value(result)
+            self.circuit_graph_node[node_id].ready_flag = True
+        else:
+            self.circuit_graph_node[node_id].ready_flag = True
+            print(f"Error: Unrecognized OP Node! Node Name = {name}")
+
+    def _assign(self,node_id):
+        name = self.circuit_graph_node[node_id].name
+        edges = self.circuit_graph_edge_grouped[node_id]
+        i_node_id = edges[0][2]
+        value = self.circuit_graph_node[i_node_id].value
+        if "x" in self.circuit_graph_node[node_id].value:
+            self.circuit_graph_node[node_id].set_value(value)
+        else:
+            print(self.circuit_graph_node[i_node_id].value == value)
+        self.circuit_graph_node[node_id].ready_flag = True
+        if len(edges) != 1:
+            raise SimulationError("Error: Signal assignment should only has 1 input.",1)
+
+    def _check_result_width(self,a:int,b:int):
+        if a != b:
+            raise SimulationError("Error: Result Widths Don't Match.",1)
+
+    def simulate(self):
+        print("Start Simulating Fault Propagation...")
+        # Simulation Loop
+        op_set = set()
+        scheduled_node_num_list = self.scheduled_node_num_list[1:]
+        print(len(self.circuit_graph_node))
+        cnt = 0
+        #for node in self.circuit_graph_node:
+        #    print(node,node.node_type)
+        for node_id in scheduled_node_num_list:
+            #print(self.circuit_graph_node[node_id].name,cnt,node_id)
+            cnt +=1
+            if self.circuit_graph_node[node_id].node_type in {"FF_out","input"}:
+                # Check FF_out
+                if self.circuit_graph_node[node_id].ready_flag:
+                    pass
+                else:
+                    raise SimulationError("Warning: input FF not be set",1)
+            elif self.circuit_graph_node[node_id].node_type == "OP":
+                self._compute(node_id)
+            else:
+                self._assign(node_id)
+
+            
+
 
 if __name__ == "__main__":
-    ast = Verilator_AST_Tree("./ast/Vsha1.xml")
 
-    sim = AST2Simulator(ast)
-    sim.build_simulator()
-
-    sim.get_circuit_graph()
-    sim.get_node_order()
+    sim = Simulator()
+    sim.load_logic_value()
+    sim.simulate()
