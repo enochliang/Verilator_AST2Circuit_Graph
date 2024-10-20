@@ -23,3 +23,5 @@ class ASTNodeClassify:
         self.sim_commutable_2in_op = self.commutable_arith_op | {"and", "or", "xor"} | self.eq_op | {"logor","logand"}
         self.sim_1in_op = {"extend"} | {"sel"} | {"not"} | self.red_logic_op
         self.sim_not_commutable_2in_op = self.not_commutable_arith_op | self.merge_op | self.less_n_greater_op
+
+        self.prob_always_prop = self.arith_op | self.extend_op | self.merge_op | {"xor", "not"}

@@ -5,6 +5,7 @@ from Verilator_AST import *
 from ASTNodeClassify import *
 from copy import deepcopy
 import pprint
+import pandas as pd
 
 class SimulationError(Exception):
     def __init__(self, message, error_code):
@@ -27,10 +28,49 @@ class Node:
     def set_fault_list(self,fault_list:dict):
         self.fault_list = fault_list
     def set_value(self,value:str):
+        if "x" in value:
+            raise SimulationError("Error: Set X Value",1)
         self.value = value
     def set_attrib(self,attrib:dict):
         for key in attrib.keys():
             self.attrib[key] = attrib[key]
+    def get_info(self):
+        pprint.pp(self.__dict__)
+
+def gt_propagate_prob_mul_bit(var:str,cnst:str):
+    #   var > const
+    # !(var <= const)
+    width = len(var)
+    var_range = pow(2,width)
+    if int(var,2) > int(cnst,2):
+        prob = float(int(cnst,2) + 1) / float(var_range)
+    else:
+        prob = float(var_range - int(cnst,2) - 1) / float(var_range)
+    return prob
+
+
+def lt_propagate_prob_mul_bit(var:str,cnst:str):
+    #   var < const
+    # !(var >= const)
+    width = len(var)
+    var_range = pow(2,width)
+    if int(var,2) < int(cnst,2):
+        prob = float(int(cnst,2)) / float(var_range)
+    else:
+        prob = float(var_range - int(cnst,2)) / float(var_range)
+    return prob
+
+def eq_propagate_prob_mul_bit(var:str,cnst:str):
+    #   var == const
+    # !(var != const)
+    width = len(var)
+    var_range = pow(2,width)
+    if int(var,2) == int(cnst,2):
+        prob = float(var_range - 1) / float(var_range)
+    else:
+        prob = float(1.0) / float(var_range)
+    return prob
+
 
 
 def verilog_num2num(num:str):
@@ -451,7 +491,10 @@ class AST2Simulator(ASTNodeClassify):
             node = self._ast.find(f".//*[@node_id='{idx}']")
             name = node.tag
             width = int(node.attrib["width"])
-            value = "x"*width
+            if name == "const":
+                value = node.attrib["name"]
+            else:
+                value = "x"*width
             node_type = "OP"
             n_node = Node(
                        name = name,
@@ -499,7 +542,7 @@ class AST2Simulator(ASTNodeClassify):
                             child = children[2].getchildren()[0]
                             if "node_id" in child.attrib:
                                 child_node_id = int(child.attrib["node_id"])
-                                self.circuit_graph_edge.append((cur_node_id,"1",child_node_id))
+                                self.circuit_graph_edge.append((cur_node_id,"0",child_node_id))
                                 edge_cnt += 1
                             elif "assign" in child.tag:
                                 child = child.getchildren()[0]
@@ -738,7 +781,7 @@ class Simulator(ASTNodeClassify):
         self.signal_table = sim.get_signal_table()
         self.cycle = 207
 
-    def load_logic_value(self):
+    def _load_logic_value(self):
         f = open("graph_sig_dict.json","r")
         self.sig_dict = json.load(f)
         f.close()
@@ -747,7 +790,6 @@ class Simulator(ASTNodeClassify):
         for sig in self.unknown_sig_list:
             self.sig_dict.pop(sig)
 
-        
         f = open(f"../sha1/run_graph/pattern/FaultFree_Signal_Value_C{self.cycle:05}.txt","r")
         logic_values = f.readlines()
         for i,v in enumerate(logic_values):
@@ -776,83 +818,51 @@ class Simulator(ASTNodeClassify):
             b_id = edges[1][2]
             a = self.circuit_graph_node[a_id].value
             b = self.circuit_graph_node[b_id].value
-            if name == 'xor':
-                if not (self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag):
-                    raise SimulationError(f"Error: Scheduling Incorrect. NODE_ID = {node_id}, OP_NAME = {name}",2)
+            # Check if all inputs are ready.
+            if not (self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag):
+                raise SimulationError(f"Error: Scheduling Incorrect. NODE_ID = {node_id}, OP_NAME = {name}",2)
+           
+            if name in {'xor','and','or','add','eq'}:
                 if len(a) != len(b):
                     raise SimulationError(f"Error: Input Widths Don't Match. NODE_ID = {node_id}, OP_NAME = {name}",1)
-                # TO MOVE OUT
-                if "x" in a or "x" in b:
-                    result = "x"*width
-                elif self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag:
+            elif name in {'logor','logand'}:
+                pass
+            else:
+                raise SimulationError(f"Error: Unrecognized OP Node! Node Name = {name}",1)
+
+            # Compute OP Result
+            if "x" in a or "x" in b:
+                result = "x"*width
+            elif "z" in a or "z" in b:
+                result = "z"*width
+            else:
+                if name == 'xor':
                     result = int(a, 2) ^ int(b, 2)
                     result = f"{result:0{len(a)}b}"
-            elif name == 'and':
-                if not (self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag):
-                    raise SimulationError(f"Error: Scheduling Incorrect. NODE_ID = {node_id}, OP_NAME = {name}",2)
-                if len(a) != len(b):
-                    raise SimulationError(f"Error: Input Widths Don't Match. NODE_ID = {node_id}, OP_NAME = {name}",1)
-                # TO MOVE OUT
-
-                if "x" in a or "x" in b:
-                    result = "x"*width
-                elif self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag:
+                elif name == 'and':
                     result = int(a, 2) & int(b, 2)
                     result = f"{result:0{len(a)}b}"
-            elif name == 'or':
-                if not (self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag):
-                    raise SimulationError(f"Error: Scheduling Incorrect. NODE_ID = {node_id}, OP_NAME = {name}",2)
-                if len(a) != len(b):
-                    raise SimulationError(f"Error: Input Widths Don't Match. NODE_ID = {node_id}, OP_NAME = {name}",1)
-                # TO MOVE OUT
-                if "x" in a or "x" in b:
-                    result = "x"*width
-                elif self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag:
+                elif name == 'or':
                     result = int(a, 2) | int(b, 2)
                     result = f"{result:0{len(a)}b}"
-            elif name == 'add':
-                if not (self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag):
-                    raise SimulationError(f"Error: Scheduling Incorrect. NODE_ID = {node_id}, OP_NAME = {name}",2)
-                if len(a) != len(b):
-                    raise SimulationError(f"Error: Input Widths Don't Match. NODE_ID = {node_id}, OP_NAME = {name}",1)
-                # TO MOVE OUT
-                if "x" in a or "x" in b:
-                    result = "x"*width
-                elif self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag:
+                elif name == 'add':
                     result = int(a, 2) + int(b, 2)
                     result = f"{result:0{width}b}"
                     if self.circuit_graph_node[node_id].width != len(result):
                         result = result[len(result)-width:]
-            elif name == 'eq':
-                if not (self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag):
-                    raise SimulationError(f"Error: Scheduling Incorrect. NODE_ID = {node_id}, OP_NAME = {name}",2)
-                if len(a) != len(b):
-                    raise SimulationError(f"Error: Input Widths Don't Match. NODE_ID = {node_id}, OP_NAME = {name}",1)
-                # TO MOVE OUT
-                if self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag:
+                elif name == 'eq':
                     result = "1" if a == b else "0"
-            elif name == 'logor':
-                if not (self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag):
-                    raise SimulationError(f"Error: Scheduling Incorrect. NODE_ID = {node_id}, OP_NAME = {name}",2)
-                # Compute OP Result
-                if "x" in a or "x" in b:
-                    result = "x"*width
-                elif self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag:
+                elif name == 'logor':
                     a = "1" if "1" in a else "0"
                     b = "1" if "1" in b else "0"
                     result = int(a,2) | int(b,2)
                     result = f"{result:0{width}b}"
-            elif name == 'logand':
-                if not (self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag):
-                    raise SimulationError(f"Error: Scheduling Incorrect. NODE_ID = {node_id}, OP_NAME = {name}",2)
-                # Compute OP Result
-                if "x" in a or "x" in b:
-                    result = "x"*width
-                elif self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag:
+                elif name == 'logand':
                     a = "1" if "1" in a else "0"
                     b = "1" if "1" in b else "0"
                     result = int(a,2) & int(b,2)
                     result = f"{result:0{width}b}"
+
             self._check_result_width(width,len(result))
             self.circuit_graph_node[node_id].set_value(result)
             self.circuit_graph_node[node_id].ready_flag = True
@@ -861,30 +871,22 @@ class Simulator(ASTNodeClassify):
             b_id = [edge[2] for edge in edges if edge[1] == "right"][0]
             a = self.circuit_graph_node[a_id].value
             b = self.circuit_graph_node[b_id].value
-            if name == 'gt':
-                if "x" in a or "x" in b:
-                    result = "x"*width
-                else:
+            if not (self.circuit_graph_node[a_id].ready_flag and self.circuit_graph_node[b_id].ready_flag):
+                raise SimulationError(f"Error: Scheduling Incorrect. NODE_ID = {node_id}, OP_NAME = {name}",2)
+            if "x" in a or "x" in b:
+                result = "x"*width
+            elif "z" in a or "z" in b:
+                result = "z"*width
+            else:
+                if name == 'gt':
                     result = "1" if int(a,2) > int(b,2) else "0"
-            elif name == 'gte':
-                if "x" in a or "x" in b:
-                    result = "x"*width
-                else:
+                elif name == 'gte':
                     result = "1" if int(a,2) >= int(b,2) else "0"
-            elif name == 'lt':
-                if "x" in a or "x" in b:
-                    result = "x"*width
-                else:
+                elif name == 'lt':
                     result = "1" if int(a,2) < int(b,2) else "0"
-            elif name == 'lte':
-                if "x" in a or "x" in b:
-                    result = "x"*width
-                else:
+                elif name == 'lte':
                     result = "1" if int(a,2) <= int(b,2) else "0"
-            elif name == 'concat':
-                if "x" in a or "x" in b:
-                    result = "x"*width
-                else:
+                elif name == 'concat':
                     result = a + b
             self._check_result_width(width,len(result))
             self.circuit_graph_node[node_id].set_value(result)
@@ -894,12 +896,10 @@ class Simulator(ASTNodeClassify):
             a = self.circuit_graph_node[a_id].value
             if name == 'extend':
                 result = "0"*(width - len(a)) + a
-                self._check_result_width(width,len(result))
             elif name == 'not':
                 mask = "1"*len(a)
                 result = int(a,2) ^ int(mask,2)
                 result = f"{result:0{width}b}"
-                self._check_result_width(width,len(result))
             elif name == 'sel':
                 bits = self.circuit_graph_node[node_id].attrib["bits"]
                 bits = bits[1:-1].split(":")
@@ -911,24 +911,30 @@ class Simulator(ASTNodeClassify):
                     result = a[len(a)-1-l_bit:]
                 else:
                     result = a[len(a)-1-l_bit:0-r_bit]
-                self._check_result_width(width,len(result))
+            self._check_result_width(width,len(result))
             self.circuit_graph_node[node_id].set_value(result)
             self.circuit_graph_node[node_id].ready_flag = True
         elif name == 'const':
             self.circuit_graph_node[node_id].ready_flag = True
+            return
         elif name == 'if':
             ctrl_id = [edge[2] for edge in edges if edge[1] == "ctrl"][0]
             ctrl = self.circuit_graph_node[ctrl_id].value
             if "x" in ctrl:
                 ctrl = "x"
+            elif "z" in ctrl:
+                raise SimulationError(f"Error: ctrl = '{ctrl}'. NODE_ID = {node_id}, OP_NAME = {name}",2)
             else:
                 ctrl = "1" if "1" in ctrl else "0"
-
             if "x" in ctrl:
                 result = "x"*width
             else:
                 tmp_edges = [edge[2] for edge in edges if edge[1] == ctrl]
-                if tmp_edges == []:
+                if tmp_edges == []: # The <if> is not fullcase
+                    result = "z"*width
+                    self._check_result_width(width,len(result))
+                    self.circuit_graph_node[node_id].set_value(result)
+                    self.circuit_graph_node[node_id].ready_flag = True
                     return
                 src_id = [edge[2] for edge in edges if edge[1] == ctrl][0]
                 result = self.circuit_graph_node[src_id].value
@@ -940,11 +946,17 @@ class Simulator(ASTNodeClassify):
             ctrl = self.circuit_graph_node[ctrl_id].value
             if "x" in ctrl:
                 result = "x"*width
+            elif "z" in ctrl:
+                raise SimulationError(f"Error: ctrl = '{ctrl}'. NODE_ID = {node_id}, OP_NAME = {name}",2)
             else:
                 tmp_edges = [edge[2] for edge in edges if edge[1] == ctrl]
                 if tmp_edges == []:
                     tmp_edges = [edge[2] for edge in edges if edge[1] == "default"]
-                    if tmp_edges == []:
+                    if tmp_edges == []: # The <case> is not fullcase
+                        result = "z"*width
+                        self._check_result_width(width,len(result))
+                        self.circuit_graph_node[node_id].set_value(result)
+                        self.circuit_graph_node[node_id].ready_flag = True
                         return
                 src_id = tmp_edges[0]
                 result = self.circuit_graph_node[src_id].value
@@ -979,7 +991,8 @@ class Simulator(ASTNodeClassify):
         if "x" in self.circuit_graph_node[node_id].value:
             self.circuit_graph_node[node_id].set_value(value)
         else:
-            print(self.circuit_graph_node[i_node_id].value == value)
+            if self.circuit_graph_node[i_node_id].value != value:
+                print("Warning: Computed Signal Values Don't Match Dumped Signal Values")
         self.circuit_graph_node[node_id].ready_flag = True
         if len(edges) != 1:
             raise SimulationError("Error: Signal assignment should only has 1 input.",1)
@@ -987,18 +1000,199 @@ class Simulator(ASTNodeClassify):
     def _check_result_width(self,a:int,b:int):
         if a != b:
             raise SimulationError("Error: Result Widths Don't Match.",1)
+    
+    def _sig_fault_propagate(self,node_id):
+        edges = self.circuit_graph_edge_grouped[node_id]
+        n_fault_list = {}
+        src_node_ids = [edge[2] for edge in edges]
+        for src_id in src_node_ids:
+            src_fault_list = self.circuit_graph_node[src_id].fault_list
+            for key in src_fault_list:
+                n_fault_list[key] = src_fault_list[key]
+        self.circuit_graph_node[node_id].set_fault_list(n_fault_list)
+
+    def _op_fault_propagate(self,node_id):
+        name = self.circuit_graph_node[node_id].name
+        edges = self.circuit_graph_edge_grouped[node_id]
+        n_fault_list = {}
+        if name in {"if","cond","case"}:
+            ctrl_id = [edge[2] for edge in edges if edge[1] == "ctrl"][0]
+            ctrl = self.circuit_graph_node[ctrl_id].value
+            tmp_edges = [edge[2] for edge in edges if edge[1] == ctrl]
+            if tmp_edges == []:
+                tmp_edges = [edge[2] for edge in edges if edge[1] == "default"]
+            if tmp_edges == []:
+                pass
+            else:
+                src_id = tmp_edges[0]
+                src_fault_list = self.circuit_graph_node[src_id].fault_list
+                for key in src_fault_list:
+                    n_fault_list[key] = src_fault_list[key]
+            ctrl_fault_list = self.circuit_graph_node[ctrl_id].fault_list
+            for key in ctrl_fault_list:
+                n_fault_list[key] = ctrl_fault_list[key]
+        elif name == "const":
+            pass
+        else:
+            src_node_ids = [edge[2] for edge in edges]
+            for src_id in src_node_ids:
+                src_fault_list = self.circuit_graph_node[src_id].fault_list
+                for key in src_fault_list:
+                    n_fault_list[key] = src_fault_list[key]
+        self.circuit_graph_node[node_id].set_fault_list(n_fault_list)
+
+    def _op_prob_fault_propagate(self,node_id):
+        name = self.circuit_graph_node[node_id].name
+        width = self.circuit_graph_node[node_id].width
+        edges = self.circuit_graph_edge_grouped[node_id]
+        if name in self.prob_always_prop:
+            n_fault_list = {}
+            prob = 1.0
+            src_node_ids = [edge[2] for edge in edges]
+            for src_id in src_node_ids:
+                src_fault_list = self.circuit_graph_node[src_id].fault_list
+                for key in src_fault_list:
+                    n_fault_list[key] = src_fault_list[key] * prob
+            self.circuit_graph_node[node_id].set_fault_list(n_fault_list)
+        elif name == "const":
+            pass
+        elif name in {"if","cond","case"}: 
+            n_fault_list = {}
+            ctrl_id = [edge[2] for edge in edges if edge[1] == "ctrl"][0]
+            ctrl = self.circuit_graph_node[ctrl_id].value
+            tmp_edges = [edge[2] for edge in edges if edge[1] == ctrl]
+            if tmp_edges == []:
+                tmp_edges = [edge[2] for edge in edges if edge[1] == "default"]
+            if tmp_edges == []:
+                pass
+            else:
+                src_id = tmp_edges[0]
+                src_fault_list = self.circuit_graph_node[src_id].fault_list
+                for key in src_fault_list:
+                    n_fault_list[key] = src_fault_list[key]
+            ctrl_fault_list = self.circuit_graph_node[ctrl_id].fault_list
+            for key in ctrl_fault_list:
+                n_fault_list[key] = ctrl_fault_list[key]
+            self.circuit_graph_node[node_id].set_fault_list(n_fault_list)
+
+        elif name == "and":
+            num_of_1 = self.circuit_graph_node[node_id].value.count("1")
+            prob = float(num_of_1) / float(width)
+            src_node_ids = [edge[2] for edge in edges]
+            n_fault_list = {}
+            for src_id in src_node_ids:
+                src_fault_list = self.circuit_graph_node[src_id].fault_list
+                for key in src_fault_list:
+                    n_fault_list[key] = src_fault_list[key] * prob
+            self.circuit_graph_node[node_id].set_fault_list(n_fault_list)
+        elif name == "or":
+            num_of_0 = self.circuit_graph_node[node_id].value.count("0")
+            prob = float(num_of_0) / float(width)
+            src_node_ids = [edge[2] for edge in edges]
+            n_fault_list = {}
+            for src_id in src_node_ids:
+                src_fault_list = self.circuit_graph_node[src_id].fault_list
+                for key in src_fault_list:
+                    n_fault_list[key] = src_fault_list[key] * prob
+            self.circuit_graph_node[node_id].set_fault_list(n_fault_list)
+
+        elif name == "logand":
+            n_fault_list = {}
+            if self.circuit_graph_node[node_id].value == "1":
+                src_node_ids = [edge[2] for edge in edges]
+                for src_id in src_node_ids:
+                    if self.circuit_graph_node[src_id].value.count("1") == 1:
+                        prob = 1.0 / float(self.circuit_graph_node[src_id].width)
+                    else:
+                        continue
+                    src_fault_list = self.circuit_graph_node[src_id].fault_list
+                    for key in src_fault_list:
+                        n_fault_list[key] = src_fault_list[key] * prob
+            else:
+                prob = 1.0
+                src_node_ids = [edge[2] for edge in edges]
+                for src_id in src_node_ids:
+                    src_fault_list = self.circuit_graph_node[src_id].fault_list
+                    for key in src_fault_list:
+                        n_fault_list[key] = src_fault_list[key] * prob
+            self.circuit_graph_node[node_id].set_fault_list(n_fault_list)
+        elif name == "logor":
+            n_fault_list = {}
+            if self.circuit_graph_node[node_id].value == "0":
+                prob = 1.0
+                src_node_ids = [edge[2] for edge in edges]
+                for src_id in src_node_ids:
+                    if self.circuit_graph_node[src_id].value.count("1") == 1:
+                        prob = 1.0 / float(self.circuit_graph_node[src_id].width)
+                    else:
+                        continue
+                    src_fault_list = self.circuit_graph_node[src_id].fault_list
+                    for key in src_fault_list:
+                        n_fault_list[key] = src_fault_list[key] * prob
+            else:
+                prob = 1.0
+                src_node_ids = [edge[2] for edge in edges]
+                for src_id in src_node_ids:
+                    src_fault_list = self.circuit_graph_node[src_id].fault_list
+                    for key in src_fault_list:
+                        n_fault_list[key] = src_fault_list[key] * prob
+            self.circuit_graph_node[node_id].set_fault_list(n_fault_list)
+
+        elif name in {"gt","lt","gte","lte"}:
+            src_node_ids = [edge[2] for edge in edges]
+            if "const" in [self.circuit_graph_node[node_id].name for node_id in src_node_ids]: # 1 Variable Compare
+                const_node_id = [node_id for node_id in src_node_ids if self.circuit_graph_node[node_id].name == "const"][0]
+                var_node_id = [node_id for node_id in src_node_ids if self.circuit_graph_node[node_id].name != "const"][0]
+                right_id = [edge[2] for edge in edges if edge[1] == "right"][0]
+                left_id = [edge[2] for edge in edges if edge[1] == "left"][0]
+                var_value = self.circuit_graph_node[var_node_id].value
+                cnst_value = self.circuit_graph_node[const_node_id].value
+                if left_id == var_node_id: # output = var ? const
+                    if name in {"gt","lte"}:
+                        prob = gt_propagate_prob_mul_bit(var_value,cnst_value)
+                    else:
+                        prob = lt_propagate_prob_mul_bit(var_value,cnst_value)
+                else:                      # output = const ? var
+                    if name in {"lt","gte"}:
+                        prob = gt_propagate_prob_mul_bit(var_value,cnst_value)
+                    else:
+                        prob = lt_propagate_prob_mul_bit(var_value,cnst_value)
+            else:
+                raise SimulationError("Error: Comparator has not only 1 variable input.")
+        elif name == "eq":
+            src_node_ids = [edge[2] for edge in edges]
+            if "const" in [self.circuit_graph_node[node_id].name for node_id in src_node_ids]: # 1 Variable Compare
+                const_node_id = [node_id for node_id in src_node_ids if self.circuit_graph_node[node_id].name == "const"][0]
+                var_node_id = [node_id for node_id in src_node_ids if self.circuit_graph_node[node_id].name != "const"][0]
+                var_value = self.circuit_graph_node[var_node_id].value
+                cnst_value = self.circuit_graph_node[const_node_id].value
+                prob = eq_propagate_prob_mul_bit(var_value,cnst_value)
+            else:
+                raise SimulationError("Error: Comparator has not only 1 variable input.")
+        elif name == "sel":
+            src_id = edges[0][2]
+            width_a = self.circuit_graph_node[src_id].width
+            prob = float(width)/float(width_a)
+            src_fault_list = self.circuit_graph_node[src_id].fault_list
+            n_fault_list = {}
+            for key in src_fault_list:
+                n_fault_list[key] = src_fault_list[key] * prob
+            self.circuit_graph_node[node_id].set_fault_list(n_fault_list)
+        else:
+            print(f"Probability Calculation Error: Unrecognized OP Node! Node Name = {name}")
+
 
     def simulate(self):
-        print("Start Simulating Fault Propagation...")
+        print("=======================================")
+        print(" Start Simulating Fault Propagation...")
         # Simulation Loop
         op_set = set()
         scheduled_node_num_list = self.scheduled_node_num_list[1:]
-        print(len(self.circuit_graph_node))
         cnt = 0
+        cur_cyc_fault_list = {}
         #for node in self.circuit_graph_node:
         #    print(node,node.node_type)
         for node_id in scheduled_node_num_list:
-            #print(self.circuit_graph_node[node_id].name,cnt,node_id)
             cnt +=1
             if self.circuit_graph_node[node_id].node_type in {"FF_out","input"}:
                 # Check FF_out
@@ -1008,14 +1202,52 @@ class Simulator(ASTNodeClassify):
                     raise SimulationError("Warning: input FF not be set",1)
             elif self.circuit_graph_node[node_id].node_type == "OP":
                 self._compute(node_id)
+                #self._op_fault_propagate(node_id)
+                self._op_prob_fault_propagate(node_id)
             else:
                 self._assign(node_id)
+                self._sig_fault_propagate(node_id)
 
-            
+            if self.circuit_graph_node[node_id].node_type == "FF_in":
+                cur_cyc_fault_list[self.circuit_graph_node[node_id].name] = self.circuit_graph_node[node_id].fault_list
+        
+        fault_effect_dict = {}
+        for dst_reg in cur_cyc_fault_list.keys():
+            for src_reg in cur_cyc_fault_list[dst_reg]:
+                prob = cur_cyc_fault_list[dst_reg][src_reg]
+                if not src_reg in fault_effect_dict:
+                    fault_effect_dict[src_reg] = [(dst_reg.replace("(FF_in)",""),prob)]
+                else:
+                    fault_effect_dict[src_reg].append((dst_reg.replace("(FF_in)",""),prob))
+        cur_cyc_rw_events = []
+        for (key, item) in fault_effect_dict.items():
+            cur_cyc_rw_events.append({"r":key, "w":item})
 
+        print(" Simulation Finish.")
+        print("=======================================")
+        return cur_cyc_rw_events
+
+    def seq_simulate(self):
+        self.rw_table_cycle_col = []
+        self.rw_table_event_col = []
+
+        for cyc in range(1037):
+            self.cycle = cyc
+            self._load_logic_value()
+            self.rw_table_event_col.append(self.simulate())
+            self.rw_table_cycle_col.append(cyc)
+
+    def dump_rw_table(self):
+        df = pd.DataFrame({"cycle":self.rw_table_cycle_col, "rw_event":self.rw_table_event_col})
+        df.to_csv("prob_rw_table.csv")
+
+    def single_cycle_simulate(self,cyc:int):
+        self.cycle = cyc
+        self._load_logic_value()
+        self.simulate()
 
 if __name__ == "__main__":
 
     sim = Simulator()
-    sim.load_logic_value()
-    sim.simulate()
+    sim.seq_simulate()
+    sim.dump_rw_table()

@@ -1673,6 +1673,7 @@ class Gen_FI_Wrapper:
         string = string + self.gen_input_pattern_filling()
         string = string + self.gen_ff_pattern_filling()
         string = string + self.gen_input_port()
+        string = string + self.gen_fi_always()
         string = string + ["endmodule"]
         for s in string:
             print(s)
@@ -1714,13 +1715,13 @@ if __name__ == "__main__":
     #dumper = DumpSigList(ast)
     #dumper.dump_sig_list()
     
-    f = open("graph_sig_dict.json","r")
+    f = open("sig_dict.json","r")
     sig_dict = json.load(f)
     f.close()
     #fl = GenFaultList(1037,sig_dict)
     #fl.get_fault_list()
-    gen = Gen_Graph_FF_Wrapper(sig_dict)
-    gen.generate()
-    #gen = Gen_FI_Wrapper(sig_dict)
+    #gen = Gen_Graph_FF_Wrapper(sig_dict)
     #gen.generate()
+    gen = Gen_FI_Wrapper(sig_dict)
+    gen.generate()
 

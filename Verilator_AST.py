@@ -2,6 +2,14 @@ from lxml import etree
 import pprint 
 pp = pprint.PrettyPrinter(indent=4)
 
+class RTL_Coding_Style_Warning(Exception):
+    def __init__(self, message, error_code):
+        super().__init__(message)
+        self.error_code = error_code
+
+    def __str__(self):
+        return f"{self.args[0]} (Error Code: {self.error_code})"
+
 class AST_Parser:
     def __init__(self, ast: etree._ElementTree):
        self.ast = ast
@@ -277,8 +285,8 @@ class AST_Parser:
         if not flag:
             print("Pass: Each FF <always> is FULLCASE")
         print("-"*80)
-    def _check_comb_always_fullcase(self):
-        print("Start checking each combinational <always> is FULLCASE...")
+    def _check_comb_always_no_seq_assign(self):
+        print("Start checking no sequential assignments under each combinational <always>...")
         flag = False
         for always in self.ast.findall(".//always"):
             if always.find(".//sentree") != None:
@@ -287,7 +295,7 @@ class AST_Parser:
             child = [i.tag for i in always.getchildren()]
             if "if" in child or "case" in child:
                 if "assign" in child:
-                    print("  Warning: Always not fullcase")
+                    print("  Warning: Found Sequential Assignments.")
                     loc = always.find("assign").attrib["loc"]
                     file_id = loc.split(",")[0]
                     loc = ",".join(loc.split(",")[1:])
@@ -302,6 +310,36 @@ class AST_Parser:
 
         if not flag:
             print("Pass: Each Comb <always> is FULLCASE")
+        print("-"*80)
+    def _check_comb_always_fullcase(self):
+        # TODO
+        print("Start checking each combinational <always> is FULLCASE...")
+        for always in self.ast.findall(".//always"):
+            if always.find(".//sentree") != None:
+                continue
+
+            for branch in always.findall(".//if") + always.findall(".//case"):
+                if branch.tag == "if":
+                    if len(branch.getchildren()) < 3:
+                        raise RTL_Coding_Style_Warning("Found a <if> without <else> case item.")
+
+                if branch.tag == "case":
+                    last_item = branch.getchildren()[-1]
+                    ctrl_dtype = branch.getchildren()[0].attrib["dtype_id"]
+                    dtype = self.ast.find(f".//basicdtype[@id='{ctrl_dtype}']")
+                    if "left" in dtype.attrib:
+                        width = int(dtype.attrib["left"]) - int(dtype.attrib["right"]) + 1
+                        fullcase_num = pow(2,width)
+                    else:
+                        fullcase_num = 2
+
+                    
+                    if len(last_item.getchildren()) != 1: # The <case> doesn't have a <default> under it.
+                        if len(branch.findall("./caseitem/const")) < fullcase_num: # The <case> has less than fullcase_num of <caseitem> under it.
+                            print(etree.tostring(branch))
+                            raise RTL_Coding_Style_Warning("Found a <case> without <default> case item, and not full case.",1)
+                        
+        print("Pass: Each Comb <always> is FULLCASE")
         print("-"*80)
 
     def _check_no_param_under_assign(self):
@@ -342,6 +380,7 @@ class AST_Parser:
         self._check_lv_single_var()
         self._check_lv_only_left()
         self._check_comb_always_only_one_lv()
+        self._check_comb_always_no_seq_assign()
         self._check_comb_always_fullcase()
         self._check_ff_always_only_one_lv()
         self._check_ff_always_fullcase()
@@ -457,7 +496,7 @@ if __name__ == "__main__":
     #pp.pprint(AST_Parser.__dict__)
     parser = AST_Parser(ast)
     #parser.get_all_tags_under("topscope")
-    #parser.check_simple_design()
-    parser.get_signal_dicts()
+    parser.check_simple_design()
+    #parser.get_ordered_children_under("eq")
 
 
